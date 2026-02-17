@@ -1,0 +1,6 @@
+google-adk[bigquery]
+google-cloud-bigquery-storage
+google-cloud-storage
+pyarrow
+opentelemetry-api
+opentelemetry-sdk
