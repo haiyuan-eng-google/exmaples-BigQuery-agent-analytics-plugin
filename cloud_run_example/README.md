@@ -124,10 +124,11 @@ smoke test. Local runs use Application Default Credentials, so run
   increase the plugin's `batch_flush_interval` significantly, increase Cloud
   Run's `--no-cpu-throttling` + termination grace too.
 - **IAM scope.** `deploy.sh` grants `roles/bigquery.dataEditor` at the
-  **dataset** level (least privilege for writes; the `--dataset` flag on
-  `bq add-iam-policy-binding` is required, otherwise the binding targets a
-  table). The project-level `roles/bigquery.user` grant is required for
-  Storage Write API jobs and cannot be scoped tighter today.
+  **dataset** level (least privilege for writes). It uses the dataset-ACL
+  path (`bq update --source`) rather than `bq add-iam-policy-binding
+  --dataset` because the latter requires an allowlist on some projects.
+  The project-level `roles/bigquery.user` grant is required for Storage
+  Write API jobs and cannot be scoped tighter today.
 - **Authentication.** `deploy.sh` defaults to
   `--no-allow-unauthenticated`; callers attach a Google ID token (see Smoke
   test above). Flip `ALLOW_UNAUTHENTICATED=true` only if you knowingly want

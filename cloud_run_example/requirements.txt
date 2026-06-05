@@ -13,3 +13,8 @@ pydantic>=2.7.0
 google-cloud-bigquery>=3.25.0
 google-cloud-bigquery-storage>=2.27.0
 pyarrow>=16.0.0
+
+# google-cloud-storage is imported unconditionally at the top of
+# bigquery_agent_analytics_plugin.py (used by the GCS offloader for
+# large payloads). The plugin fails to import without it.
+google-cloud-storage>=2.18.0

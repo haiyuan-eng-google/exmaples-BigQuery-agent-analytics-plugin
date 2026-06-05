@@ -80,18 +80,33 @@ else
 fi
 
 # 4. Grant IAM:
-#    * BigQuery Data Editor on the dataset (writes agent_events). The
-#      --dataset flag is REQUIRED -- bq otherwise treats the identifier
-#      as a table name and the binding silently misses the dataset.
+#    * BigQuery Data Editor on the dataset (writes agent_events). We use
+#      the dataset-ACL path (`bq update --source`) instead of
+#      `bq add-iam-policy-binding --dataset` because the latter requires
+#      an allowlist on some projects ("This feature requires allowlisting"
+#      error). The ACL path is supported everywhere.
 #    * BigQuery User on the project (Storage Write API jobs).
 #    * Vertex AI User on the project (Gemini via Vertex AI).
 echo
 echo "--- Granting IAM ---"
-bq --project_id="${PROJECT_ID}" add-iam-policy-binding \
-  --dataset \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/bigquery.dataEditor" \
-  "${PROJECT_ID}:${BQAA_DATASET_ID}"
+_DS_JSON="$(mktemp -t bqaa-ds-XXXXXX.json)"
+bq --project_id="${PROJECT_ID}" show --format=prettyjson \
+  "${PROJECT_ID}:${BQAA_DATASET_ID}" > "${_DS_JSON}"
+python3 - "${_DS_JSON}" "${SA_EMAIL}" <<'PY'
+import json, sys
+path, sa = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    ds = json.load(f)
+entry = {"role": "roles/bigquery.dataEditor", "userByEmail": sa}
+access = ds.get("access", [])
+if entry not in access:
+    access.append(entry)
+ds["access"] = access
+with open(path, "w") as f:
+    json.dump(ds, f)
+PY
+bq update --source "${_DS_JSON}" "${PROJECT_ID}:${BQAA_DATASET_ID}"
+rm -f "${_DS_JSON}"
 
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${SA_EMAIL}" \
