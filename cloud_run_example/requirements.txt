@@ -1,0 +1,15 @@
+# ADK 2.0+ with the BigQuery Agent Analytics Plugin. The 1.26.0 floor
+# matches the integration page (https://adk.dev/integrations/bigquery-agent-analytics/)
+# and is the minimum that ships the auto-schema-upgrade behavior this example
+# depends on.
+google-adk>=1.26.0
+
+# FastAPI + uvicorn for the HTTP surface Cloud Run probes.
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+
+# BigQuery Storage Write API path. PyArrow is required for the async path.
+google-cloud-bigquery>=3.25.0
+google-cloud-bigquery-storage>=2.27.0
+pyarrow>=16.0.0
