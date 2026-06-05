@@ -62,13 +62,19 @@ curl -s -X POST "$URL/chat" \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"u1","session_id":"s1","message":"Hello"}' | jq
 
-bq query --project_id="$PROJECT_ID" --use_legacy_sql=false "
+bq query --project_id="$PROJECT_ID" --location="$REGION" \
+  --use_legacy_sql=false "
   SELECT event_type, agent, COUNT(*) AS n
     FROM \`$PROJECT_ID.$BQAA_DATASET_ID.agent_events\`
     WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
     GROUP BY event_type, agent
     ORDER BY n DESC"
 ```
+
+`--location="$REGION"` is required because `deploy.sh` creates the
+dataset in the same single region as Cloud Run (e.g. `us-central1`),
+not in the `US` multi-region. BigQuery rejects jobs whose `--location`
+doesn't match the dataset's.
 
 To let another identity invoke the service, grant `roles/run.invoker`:
 

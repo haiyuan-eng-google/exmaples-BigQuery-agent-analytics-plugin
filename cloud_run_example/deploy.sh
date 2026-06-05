@@ -55,8 +55,11 @@ gcloud services enable \
   iam.googleapis.com \
   --project="${PROJECT_ID}"
 
-# 2. Create the BigQuery dataset if missing. Location matches the Cloud Run
-#    region's BQ region (us-central1 -> US multi-region).
+# 2. Create the BigQuery dataset if missing. The dataset is created in the
+#    same single region as Cloud Run (REGION, e.g. us-central1). BigQuery
+#    treats regions and multi-regions as distinct locations, so jobs must
+#    be submitted with the matching --location -- the smoke-test query
+#    below passes --location="${REGION}" for that reason.
 echo
 echo "--- Ensuring BigQuery dataset exists ---"
 if ! bq --project_id="${PROJECT_ID}" show "${PROJECT_ID}:${BQAA_DATASET_ID}" >/dev/null 2>&1; then
@@ -181,7 +184,8 @@ fi
 echo
 echo "Then query BigQuery:"
 cat <<EOF
-  bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false \\
+  bq query --project_id="${PROJECT_ID}" --location="${REGION}" \\
+    --use_legacy_sql=false \\
     "SELECT event_type, agent, COUNT(*) AS n
        FROM \\\`${PROJECT_ID}.${BQAA_DATASET_ID}.${BQAA_TABLE_ID}\\\`
        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
