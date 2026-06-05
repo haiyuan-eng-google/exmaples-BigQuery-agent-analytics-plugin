@@ -7,8 +7,9 @@ Differences from fast_api_example.py at the repo root:
   --set-env-vars on deploy; see cloud_run_example/deploy.sh).
 * /health endpoint for Cloud Run's startup / liveness probes.
 * PORT environment variable is respected (Cloud Run sets it; default 8080).
-* Structured JSON logging so Cloud Logging picks up severity and trace fields.
-* Lifespan shutdown awaits bq_plugin.close() so the plugin's batch processor
+* Structured JSON logging via logging.dictConfig so the app log, uvicorn, and
+  uvicorn.access all emit JSON for Cloud Logging.
+* Lifespan shutdown awaits the plugin's shutdown() so the batch processor
   flushes in-flight rows before the container terminates.
 
 Auth: the container uses Application Default Credentials. On Cloud Run that
@@ -24,20 +25,19 @@ See deploy.sh for the gcloud commands that wire all of the above up.
 from contextlib import asynccontextmanager
 import json
 import logging
+import logging.config
 import os
-import sys
-from typing import Optional
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.apps.app import App
 from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
-from google.adk.models.gemini_model import GeminiModel
 from google.adk.plugins.bigquery_agent_analytics_plugin import (
     BigQueryAgentAnalyticsPlugin,
     BigQueryLoggerConfig,
 )
-from google.adk.runners.runner import Runner
+from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
@@ -46,21 +46,67 @@ from pydantic import BaseModel
 # --- Structured JSON logging for Cloud Logging ---
 # Cloud Logging auto-parses JSON on stdout; emitting structured records makes
 # severity, message, and any extra fields queryable in the Logs Explorer.
+# Anything passed via `logger.info("...", extra={...})` is included as
+# top-level JSON fields.
+
+_STANDARD_LOG_RECORD_ATTRS = frozenset({
+    "args", "asctime", "created", "exc_info", "exc_text", "filename",
+    "funcName", "levelname", "levelno", "lineno", "message", "module",
+    "msecs", "msg", "name", "pathname", "process", "processName",
+    "relativeCreated", "stack_info", "taskName", "thread", "threadName",
+    "color_message",  # uvicorn's extra
+})
+
+
 class _JsonFormatter(logging.Formatter):
   def format(self, record: logging.LogRecord) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "severity": record.levelname,
         "message": record.getMessage(),
         "logger": record.name,
     }
+    # Emit any caller-supplied extras (logger.info("...", extra={...}))
+    # as top-level fields so they are queryable in Cloud Logging.
+    for key, value in record.__dict__.items():
+      if key in _STANDARD_LOG_RECORD_ATTRS or key in payload:
+        continue
+      try:
+        json.dumps(value)
+        payload[key] = value
+      except (TypeError, ValueError):
+        payload[key] = repr(value)
     if record.exc_info:
       payload["exception"] = self.formatException(record.exc_info)
     return json.dumps(payload)
 
 
-_handler = logging.StreamHandler(sys.stdout)
-_handler.setFormatter(_JsonFormatter())
-logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
+# dictConfig fully replaces logging configuration -- including uvicorn's own
+# loggers, since uvicorn pulls its formatters via the same root logging
+# module. This means the Dockerfile does NOT need --log-config; uvicorn's
+# default config (applied at startup) is overridden here at app import time
+# because dictConfig sets `disable_existing_loggers=False` and re-binds the
+# uvicorn handlers.
+_LOG_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "json": {"()": _JsonFormatter},
+    },
+    "handlers": {
+        "stdout": {
+            "class": "logging.StreamHandler",
+            "stream": "ext://sys.stdout",
+            "formatter": "json",
+        },
+    },
+    "root": {"level": "INFO", "handlers": ["stdout"]},
+    "loggers": {
+        "uvicorn":        {"level": "INFO", "handlers": ["stdout"], "propagate": False},
+        "uvicorn.error":  {"level": "INFO", "handlers": ["stdout"], "propagate": False},
+        "uvicorn.access": {"level": "INFO", "handlers": ["stdout"], "propagate": False},
+    },
+}
+logging.config.dictConfig(_LOG_CONFIG)
 logger = logging.getLogger("bqaa.cloud_run_example")
 
 
@@ -86,14 +132,15 @@ PORT = int(os.environ.get("PORT", "8080"))
 
 # Vertex AI is the production-friendly path on Cloud Run (no API key
 # management; uses the runtime service account's IAM). The Gemini client
-# reads this flag.
+# reads these env vars.
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
 os.environ.setdefault("GOOGLE_CLOUD_LOCATION", LOCATION)
 
 
 # --- Agent + App + Plugin wiring (matches fast_api_example.py) ---
-model = GeminiModel(model_name=GEMINI_MODEL)
-agent = LlmAgent(name=AGENT_NAME, model=model)
+# LlmAgent.model accepts a model string directly; the ADK registry resolves
+# "gemini-*" names to the Gemini provider. No model-class import needed.
+agent = LlmAgent(name=AGENT_NAME, model=GEMINI_MODEL)
 
 bq_plugin = BigQueryAgentAnalyticsPlugin(
     project_id=PROJECT_ID,
@@ -133,12 +180,18 @@ async def lifespan(_: FastAPI):
       },
   )
   yield
-  logger.info("Shutting down; flushing BigQuery plugin")
   # Flush in-flight rows before the container terminates. Without this,
   # Cloud Run's SIGTERM grace window may end before the plugin's batch
-  # processor has shipped its last batch.
-  if hasattr(bq_plugin, "close"):
-    await bq_plugin.close()
+  # processor has shipped its last batch. The plugin's public lifecycle
+  # method is shutdown(); close() exists on internal batch processors only.
+  logger.info("Shutting down; flushing BigQuery plugin")
+  try:
+    if hasattr(bq_plugin, "shutdown"):
+      await bq_plugin.shutdown()
+    elif hasattr(bq_plugin, "close"):
+      await bq_plugin.close()
+  except Exception:
+    logger.exception("Plugin shutdown raised; events may not have flushed")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -223,7 +276,10 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         session_id=request.session_id,
     )
 
-  except Exception as exc:
+  except Exception:
+    # Log the full exception server-side; return a generic body to the
+    # caller so we don't leak stack traces / model errors / project IDs over
+    # an internet-facing endpoint.
     logger.exception(
         "Agent execution failed",
         extra={
@@ -231,7 +287,9 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             "session_id": request.session_id,
         },
     )
-    raise HTTPException(status_code=500, detail=str(exc)) from exc
+    raise HTTPException(
+        status_code=500, detail="Internal error processing agent turn."
+    )
 
 
 if __name__ == "__main__":
@@ -239,4 +297,4 @@ if __name__ == "__main__":
   # uvicorn directly (see Dockerfile).
   import uvicorn
 
-  uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_config=None)
+  uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_config=_LOG_CONFIG)

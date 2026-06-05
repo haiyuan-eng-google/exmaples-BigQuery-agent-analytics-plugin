@@ -49,12 +49,16 @@ The script:
 
 ## Smoke test after deploy
 
-The deploy output ends with the exact commands. The short form:
+The deploy output ends with the exact commands. By default the service is
+**private** (`--no-allow-unauthenticated`), so callers attach a Google ID
+token:
 
 ```bash
 URL=https://your-service-xxxx-uc.a.run.app
+TOKEN="$(gcloud auth print-identity-token)"
 
 curl -s -X POST "$URL/chat" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"u1","session_id":"s1","message":"Hello"}' | jq
 
@@ -65,6 +69,17 @@ bq query --project_id="$PROJECT_ID" --use_legacy_sql=false "
     GROUP BY event_type, agent
     ORDER BY n DESC"
 ```
+
+To let another identity invoke the service, grant `roles/run.invoker`:
+
+```bash
+gcloud run services add-iam-policy-binding bqaa-cloud-run-example \
+  --project="$PROJECT_ID" --region="$REGION" \
+  --member="user:you@example.com" --role="roles/run.invoker"
+```
+
+If you knowingly want a public endpoint (each call bills Vertex AI), set
+`ALLOW_UNAUTHENTICATED=true` when running `deploy.sh`.
 
 You should see at least `USER_MESSAGE_RECEIVED`, `AGENT_STARTING`,
 `LLM_REQUEST`, `LLM_RESPONSE`, `AGENT_RESPONSE`, `AGENT_COMPLETED` rows.
@@ -103,18 +118,22 @@ smoke test. Local runs use Application Default Credentials, so run
   Cloud Run instance restarts or scale-to-zero. For multi-turn conversations
   that must persist across instances, replace with a persistent session
   service (e.g. Firestore-backed). Two-line change in `main.py`.
-- **Graceful shutdown matters.** `lifespan` awaits `bq_plugin.close()` so
-  in-flight rows flush before SIGTERM. Cloud Run's default shutdown grace
-  window is 10 seconds; if you increase the plugin's `batch_flush_interval`
-  significantly, increase Cloud Run's `--no-cpu-throttling` + termination
-  grace too.
+- **Graceful shutdown matters.** `lifespan` awaits `bq_plugin.shutdown()`
+  (the plugin's public lifecycle method) so in-flight rows flush before
+  SIGTERM. Cloud Run's default shutdown grace window is 10 seconds; if you
+  increase the plugin's `batch_flush_interval` significantly, increase Cloud
+  Run's `--no-cpu-throttling` + termination grace too.
 - **IAM scope.** `deploy.sh` grants `roles/bigquery.dataEditor` at the
-  **dataset** level (least privilege for writes). The project-level
-  `roles/bigquery.user` grant is required for Storage Write API jobs and
-  cannot be scoped tighter today.
-- **Unauthenticated invocation.** `deploy.sh` uses `--allow-unauthenticated`
-  for the smoke test. For anything not throwaway, drop that flag and put
-  Identity-Aware Proxy or your own auth layer in front of the service.
+  **dataset** level (least privilege for writes; the `--dataset` flag on
+  `bq add-iam-policy-binding` is required, otherwise the binding targets a
+  table). The project-level `roles/bigquery.user` grant is required for
+  Storage Write API jobs and cannot be scoped tighter today.
+- **Authentication.** `deploy.sh` defaults to
+  `--no-allow-unauthenticated`; callers attach a Google ID token (see Smoke
+  test above). Flip `ALLOW_UNAUTHENTICATED=true` only if you knowingly want
+  a public endpoint. The `/chat` handler also returns generic 500 bodies
+  so internal stack traces don't leak to callers; the full exception lands
+  in Cloud Logging.
 - **Cost.** Each Cloud Run cold start runs the plugin's initial table
   create-if-missing call. The Vertex AI / Gemini call cost dominates the
   per-request bill; BigQuery Storage Write API is sub-cent per request at

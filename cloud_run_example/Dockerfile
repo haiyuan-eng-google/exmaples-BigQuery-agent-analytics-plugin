@@ -24,6 +24,8 @@ COPY main.py .
 ENV PORT=8080
 EXPOSE 8080
 
-# uvicorn binds 0.0.0.0 so Cloud Run can reach it. log-config=none keeps
-# uvicorn from overriding the JSON formatter the app installs.
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --log-config /dev/null"]
+# uvicorn binds 0.0.0.0 so Cloud Run can reach it. Logging is configured
+# in main.py at import time via logging.dictConfig, which re-binds uvicorn's
+# loggers to the JSON handler; no --log-config flag is needed (and passing
+# /dev/null would crash uvicorn because it's parsed as a logging INI file).
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
